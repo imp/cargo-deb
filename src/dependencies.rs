@@ -1,9 +1,9 @@
 use crate::error::*;
 use crate::listener::Listener;
+use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
-use rayon::prelude::*;
 
 /// Resolves the dependencies based on the output of ldd on the binary.
 pub fn resolve(path: &Path, architecture: &str, listener: &dyn Listener) -> CDResult<Vec<String>> {
@@ -13,13 +13,18 @@ pub fn resolve(path: &Path, architecture: &str, listener: &dyn Listener) -> CDRe
             .output()
             .map_err(|e| CargoDebError::CommandFailed(e, "ldd"))?;
         if !output.status.success() {
-            return Err(CargoDebError::CommandError("ldd", path.display().to_string(), output.stderr));
+            return Err(CargoDebError::CommandError(
+                "ldd",
+                path.display().to_string(),
+                output.stderr,
+            ));
         }
         String::from_utf8(output.stdout).unwrap()
     };
 
     // Create an iterator of unique dependencies
-    let dependencies: HashSet<_> = dependencies.lines()
+    let dependencies: HashSet<_> = dependencies
+        .lines()
         // We only want the third field on each line, which contains the filepath of the library.
         .map(|line| line.split_whitespace().nth(2))
         // If the field exists and starts with '/', we have found a filepath.
@@ -58,19 +63,30 @@ fn get_package_name_with_fallback(path: &str) -> CDResult<String> {
                 Ok(res) => Ok(res),
                 _ => Err(e),
             }
-        },
+        }
         Err(e) => Err(e),
     }
 }
 
 /// Obtains the name of the package that belongs to the file that ldd returned.
 fn get_package_name(path: &str) -> CDResult<String> {
-    let output = Command::new("dpkg").arg("-S").arg(path)
-        .output().map_err(|e| CargoDebError::CommandFailed(e, "dpkg -S"))?;
+    let output = Command::new("dpkg")
+        .arg("-S")
+        .arg(path)
+        .output()
+        .map_err(|e| CargoDebError::CommandFailed(e, "dpkg -S"))?;
     if !output.status.success() {
-        return Err(CargoDebError::PackageNotFound(path.to_owned(), output.stderr));
+        return Err(CargoDebError::PackageNotFound(
+            path.to_owned(),
+            output.stderr,
+        ));
     }
-    let package = output.stdout.iter().take_while(|&&x| x != b':').cloned().collect::<Vec<u8>>();
+    let package = output
+        .stdout
+        .iter()
+        .take_while(|&&x| x != b':')
+        .cloned()
+        .collect::<Vec<u8>>();
     Ok(String::from_utf8(package).unwrap())
 }
 
@@ -83,7 +99,11 @@ fn get_version(package: &str) -> CDResult<String> {
         .output()
         .map_err(|e| CargoDebError::CommandFailed(e, "dpkg-query (get package version)"))?;
     if !output.status.success() {
-        return Err(CargoDebError::CommandError("dpkg-query (get package version)", package.to_owned(), output.stderr));
+        return Err(CargoDebError::CommandError(
+            "dpkg-query (get package version)",
+            package.to_owned(),
+            output.stderr,
+        ));
     }
     let version = ::std::str::from_utf8(&output.stdout).unwrap();
     Ok(version.splitn(2, '-').next().unwrap().to_owned())

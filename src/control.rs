@@ -11,7 +11,12 @@ use std::io::Write;
 use std::path::PathBuf;
 
 /// Generates an uncompressed tar archive with `control`, `md5sums`, and others
-pub fn generate_archive(options: &Config, time: u64, asset_hashes: HashMap<PathBuf, Digest>, listener: &mut dyn Listener) -> CDResult<Vec<u8>> {
+pub fn generate_archive(
+    options: &Config,
+    time: u64,
+    asset_hashes: HashMap<PathBuf, Digest>,
+    listener: &mut dyn Listener,
+) -> CDResult<Vec<u8>> {
     let mut archive = Archive::new(time);
     generate_md5sums(&mut archive, options, asset_hashes)?;
     generate_control(&mut archive, options, listener)?;
@@ -35,7 +40,11 @@ fn generate_scripts(archive: &mut Archive, option: &Config) -> CDResult<()> {
 }
 
 /// Creates the md5sums file which contains a list of all contained files and the md5sums of each.
-fn generate_md5sums(archive: &mut Archive, options: &Config, asset_hashes: HashMap<PathBuf, Digest>) -> CDResult<()> {
+fn generate_md5sums(
+    archive: &mut Archive,
+    options: &Config,
+    asset_hashes: HashMap<PathBuf, Digest>,
+) -> CDResult<()> {
     let mut md5sums: Vec<u8> = Vec::new();
 
     // Collect md5sums from each asset in the archive.
@@ -53,7 +62,11 @@ fn generate_md5sums(archive: &mut Archive, options: &Config, asset_hashes: HashM
 }
 
 /// Generates the control file that obtains all the important information about the package.
-fn generate_control(archive: &mut Archive, options: &Config, listener: &mut dyn Listener) -> CDResult<()> {
+fn generate_control(
+    archive: &mut Archive,
+    options: &Config,
+    listener: &mut dyn Listener,
+) -> CDResult<()> {
     // Create and return the handle to the control file with write access.
     let mut control: Vec<u8> = Vec::with_capacity(1024);
 
@@ -79,14 +92,21 @@ fn generate_control(archive: &mut Archive, options: &Config, listener: &mut dyn 
     control.write_all(b"Standards-Version: 3.9.4\n")?;
     writeln!(&mut control, "Maintainer: {}", options.maintainer)?;
 
-    let installed_size = options.assets.resolved
+    let installed_size = options
+        .assets
+        .resolved
         .iter()
         .filter_map(|m| m.source.len())
-        .sum::<u64>() / 1024;
+        .sum::<u64>()
+        / 1024;
 
     writeln!(&mut control, "Installed-Size: {}", installed_size)?;
 
-    writeln!(&mut control, "Depends: {}", options.get_dependencies(listener)?)?;
+    writeln!(
+        &mut control,
+        "Depends: {}",
+        options.get_dependencies(listener)?
+    )?;
 
     if let Some(ref conflicts) = options.conflicts {
         writeln!(&mut control, "Conflicts: {}", conflicts)?;

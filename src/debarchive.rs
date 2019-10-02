@@ -14,7 +14,10 @@ pub struct DebArchive {
 
 impl DebArchive {
     pub fn new(config: &Config) -> CDResult<Self> {
-        let out_filename = format!("{}_{}_{}.deb", config.deb_name, config.deb_version, config.architecture);
+        let out_filename = format!(
+            "{}_{}_{}.deb",
+            config.deb_name, config.deb_version, config.architecture
+        );
         let prefix = config.deb_temp_dir();
         let out_abspath = config.deb_output_path(&out_filename);
         {
@@ -31,9 +34,12 @@ impl DebArchive {
     }
 
     pub fn add_path(&mut self, path: &Path) -> CDResult<()> {
-        let dest_path = path.strip_prefix(&self.prefix).map_err(|_| "invalid path")?;
+        let dest_path = path
+            .strip_prefix(&self.prefix)
+            .map_err(|_| "invalid path")?;
         let mut file = File::open(&path)?;
-        self.ar_builder.append_file(&dest_path.as_unix_path(), &mut file)?;
+        self.ar_builder
+            .append_file(&dest_path.as_unix_path(), &mut file)?;
         Ok(())
     }
 

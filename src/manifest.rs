@@ -5,6 +5,7 @@ use crate::listener::Listener;
 use crate::ok_or::OkOrThen;
 use cargo_toml;
 use glob;
+use rayon::prelude::*;
 use serde_derive::Deserialize;
 use serde_json;
 use std::borrow::Cow;
@@ -14,7 +15,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use toml;
-use rayon::prelude::*;
 
 fn is_glob_pattern(s: &str) -> bool {
     s.contains('*') || s.contains('[') || s.contains(']') || s.contains('!')
@@ -47,13 +47,12 @@ impl AssetSource {
     pub fn data(&self) -> CDResult<Cow<'_, [u8]>> {
         Ok(match *self {
             AssetSource::Path(ref p) => {
-                let data = fs::read(p)
-                    .map_err(|e| CargoDebError::IoFile("unable to read asset to add to archive", e, p.to_owned()))?;
+                let data = fs::read(p).map_err(|e| {
+                    CargoDebError::IoFile("unable to read asset to add to archive", e, p.to_owned())
+                })?;
                 Cow::Owned(data)
-            },
-            AssetSource::Data(ref d) => {
-                Cow::Borrowed(d)
-            },
+            }
+            AssetSource::Data(ref d) => Cow::Borrowed(d),
         })
     }
 
@@ -120,12 +119,18 @@ impl Asset {
     pub fn new(source: AssetSource, mut target_path: PathBuf, chmod: u32, is_built: bool) -> Self {
         // is_dir() is only for paths that exist
         if target_path.to_string_lossy().ends_with('/') {
-            let file_name = source.path().and_then(|p| p.file_name()).expect("source must be a file");
+            let file_name = source
+                .path()
+                .and_then(|p| p.file_name())
+                .expect("source must be a file");
             target_path = target_path.join(file_name);
         }
 
         if target_path.is_absolute() || target_path.has_root() {
-            target_path = target_path.strip_prefix("/").expect("no root dir").to_owned();
+            target_path = target_path
+                .strip_prefix("/")
+                .expect("no root dir")
+                .to_owned();
         }
 
         Self {
@@ -141,7 +146,8 @@ impl Asset {
     }
 
     fn is_dynamic_library(&self) -> bool {
-        self.target_path.file_name()
+        self.target_path
+            .file_name()
             .and_then(|f| f.to_str())
             .map_or(false, |f| f.ends_with(DLL_SUFFIX))
     }
@@ -262,32 +268,60 @@ impl Config {
     /// Makes a new config from `Cargo.toml` in the current working directory.
     ///
     /// `None` target means the host machine's architecture.
-    pub fn from_manifest(manifest_path: &Path, package_name: Option<&str>, output_path: Option<String>, target: Option<&str>, variant: Option<&str>, deb_version: Option<String>, listener: &dyn Listener) -> CDResult<Config> {
+    pub fn from_manifest(
+        manifest_path: &Path,
+        package_name: Option<&str>,
+        output_path: Option<String>,
+        target: Option<&str>,
+        variant: Option<&str>,
+        deb_version: Option<String>,
+        listener: &dyn Listener,
+    ) -> CDResult<Config> {
         let metadata = cargo_metadata(manifest_path)?;
         let available_package_names = || {
-            metadata.packages.iter()
+            metadata
+                .packages
+                .iter()
                 .filter(|p| metadata.workspace_members.iter().any(|w| w == &p.id))
                 .map(|p| p.name.as_str())
-                .collect::<Vec<_>>().join(", ")
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         let root_package = if let Some(name) = package_name {
-            metadata.packages.iter().find(|p| {
-                p.name == name
-            })
-            .ok_or_else(|| CargoDebError::PackageNotFoundInWorkspace(name.into(), available_package_names()))
+            metadata
+                .packages
+                .iter()
+                .find(|p| p.name == name)
+                .ok_or_else(|| {
+                    CargoDebError::PackageNotFoundInWorkspace(
+                        name.into(),
+                        available_package_names(),
+                    )
+                })
         } else {
-            metadata.resolve.root.as_ref().and_then(|root_id| {
-                metadata.packages.iter()
-                    .find(|p| &p.id == root_id)
-            })
-            .ok_or_else(|| CargoDebError::NoRootFoundInWorkspace(available_package_names()))
+            metadata
+                .resolve
+                .root
+                .as_ref()
+                .and_then(|root_id| metadata.packages.iter().find(|p| &p.id == root_id))
+                .ok_or_else(|| CargoDebError::NoRootFoundInWorkspace(available_package_names()))
         }?;
         let target_dir = Path::new(&metadata.target_directory);
         let manifest_path = Path::new(&root_package.manifest_path);
         let manifest_dir = manifest_path.parent().unwrap();
-        let content = fs::read(&manifest_path)
-            .map_err(|e| CargoDebError::IoFile("unable to read Cargo.toml", e, manifest_path.to_owned()))?;
-        toml::from_slice::<Cargo>(&content)?.into_config(root_package, manifest_dir, output_path, target_dir, target, variant, deb_version, listener)
+        let content = fs::read(&manifest_path).map_err(|e| {
+            CargoDebError::IoFile("unable to read Cargo.toml", e, manifest_path.to_owned())
+        })?;
+        toml::from_slice::<Cargo>(&content)?.into_config(
+            root_package,
+            manifest_dir,
+            output_path,
+            target_dir,
+            target,
+            variant,
+            deb_version,
+            listener,
+        )
     }
 
     pub(crate) fn get_dependencies(&self, listener: &dyn Listener) -> CDResult<String> {
@@ -296,14 +330,19 @@ impl Config {
             let word = word.trim();
             if word == "$auto" {
                 let bin = self.all_binaries();
-                let resolved = bin.par_iter()
+                let resolved = bin
+                    .par_iter()
                     .filter_map(|p| p.path())
                     .filter_map(|bname| match resolve(bname, &self.architecture, listener) {
                         Ok(bindeps) => Some(bindeps),
                         Err(err) => {
-                            listener.warning(format!("{} (no auto deps for {})", err, bname.display()));
+                            listener.warning(format!(
+                                "{} (no auto deps for {})",
+                                err,
+                                bname.display()
+                            ));
                             None
-                        },
+                        }
                     })
                     .collect::<Vec<_>>();
                 for dep in resolved.into_iter().flat_map(|s| s.into_iter()) {
@@ -317,8 +356,15 @@ impl Config {
     }
 
     pub fn resolve_assets(&mut self) -> CDResult<()> {
-        for UnresolvedAsset { source_path, target_path, chmod, is_built } in self.assets.unresolved.drain(..) {
-            let source_prefix: PathBuf = source_path.iter()
+        for UnresolvedAsset {
+            source_path,
+            target_path,
+            chmod,
+            is_built,
+        } in self.assets.unresolved.drain(..)
+        {
+            let source_prefix: PathBuf = source_path
+                .iter()
                 .take_while(|part| !is_glob_pattern(part.to_str().unwrap()))
                 .collect();
             let source_is_glob = is_glob_pattern(source_path.to_str().unwrap());
@@ -378,7 +424,11 @@ impl Config {
 
     pub fn add_debug_assets(&mut self) {
         let mut assets_to_add: Vec<Asset> = Vec::new();
-        for asset in self.built_binaries().into_iter().filter(|a| a.source.path().is_some()) {
+        for asset in self
+            .built_binaries()
+            .into_iter()
+            .filter(|a| a.source.path().is_some())
+        {
             let debug_source = asset.source.debug_source().unwrap();
             if debug_source.exists() {
                 let debug_target = asset.debug_target().unwrap();
@@ -412,7 +462,10 @@ impl Config {
 
     /// Executables AND dynamic libraries
     fn all_binaries(&self) -> Vec<&AssetSource> {
-        self.binaries(false).iter().map(|asset| &asset.source).collect()
+        self.binaries(false)
+            .iter()
+            .map(|asset| &asset.source)
+            .collect()
     }
 
     /// Executables AND dynamic libraries, but only in `target/release`
@@ -442,7 +495,12 @@ impl Config {
     /// user-friendly URLs or webpages instead of tool-specific URL schemes.
     pub(crate) fn repository_type(&self) -> Option<&str> {
         if let Some(ref repo) = self.repository {
-            if repo.starts_with("git+") || repo.ends_with(".git") || repo.contains("git@") || repo.contains("github.com") || repo.contains("gitlab.com") {
+            if repo.starts_with("git+")
+                || repo.ends_with(".git")
+                || repo.contains("git@")
+                || repo.contains("github.com")
+                || repo.contains("gitlab.com")
+            {
                 return Some("Git");
             }
             if repo.starts_with("cvs+") || repo.contains("pserver:") || repo.contains("@cvs.") {
@@ -525,12 +583,14 @@ impl Cargo {
         let mut deb = if let Some(variant) = variant {
             // Use dash as underscore is not allowed in package names
             self.package.name = format!("{}-{}", self.package.name, variant);
-            let mut deb = self.package
+            let mut deb = self
+                .package
                 .metadata
                 .take()
                 .and_then(|m| m.deb)
                 .unwrap_or_else(CargoDeb::default);
-            let variant = deb.variants
+            let variant = deb
+                .variants
                 .as_mut()
                 .and_then(|v| v.remove(variant))
                 .ok_or(CargoDebError::VariantNotFound(variant.to_string()))?;
@@ -543,59 +603,73 @@ impl Cargo {
                 .unwrap_or_else(CargoDeb::default)
         };
 
-        let (license_file, license_file_skip_lines) = self.license_file(deb.license_file.as_ref())?;
+        let (license_file, license_file_skip_lines) =
+            self.license_file(deb.license_file.as_ref())?;
         let readme = self.package.readme.as_ref();
         self.check_config(manifest_dir, readme, &deb, listener);
-        let mut config = Config {
-            manifest_dir: manifest_dir.to_owned(),
-            deb_output_path,
-            target: target.map(|t| t.to_string()),
-            target_dir,
-            name: self.package.name.clone(),
-            deb_name: deb.name.take().unwrap_or(self.package.name.clone()),
-            deb_version: deb_version.unwrap_or(self.version_string(deb.revision)),
-            license: self.package.license.take(),
-            license_file,
-            license_file_skip_lines,
-            copyright: deb.copyright.take().ok_or_then(|| {
-                if self.package.authors.is_empty() {
-                    Err("The package must have a copyright or authors property")?;
-                }
-                Ok(self.package.authors.join(", "))
-            })?,
-            homepage: self.package.homepage.clone(),
-            documentation: self.package.documentation.clone(),
-            repository: self.package.repository.take(),
-            description: self.package.description.take().unwrap_or_else(||format!("[generated from Rust crate {}]", self.package.name)),
-            extended_description: self.extended_description(deb.extended_description.take(), readme)?,
-            maintainer: deb.maintainer.take().ok_or_then(|| {
-                Ok(self.package.authors.get(0)
-                    .ok_or("The package must have a maintainer or authors property")?.to_owned())
-            })?,
-            depends: deb.depends.take().unwrap_or("$auto".to_owned()),
-            conflicts: deb.conflicts.take(),
-            breaks: deb.breaks.take(),
-            replaces: deb.replaces.take(),
-            provides: deb.provides.take(),
-            section: deb.section.take(),
-            priority: deb.priority.take().unwrap_or("optional".to_owned()),
-            architecture: get_arch(target.unwrap_or(crate::DEFAULT_TARGET)).to_owned(),
-            conf_files: deb.conf_files.map(|x| x.iter().fold(String::new(), |a, b| a + b + "\n")),
-            assets: Assets::new(),
-            changelog: deb.changelog.take(),
-            maintainer_scripts: deb.maintainer_scripts.map(PathBuf::from),
-            features: deb.features.take().unwrap_or(vec![]),
-            default_features: deb.default_features.unwrap_or(true),
-            separate_debug_symbols: deb.separate_debug_symbols.unwrap_or(false),
-            strip: self.profile.as_ref().and_then(|p|p.release.as_ref())
-                .and_then(|r| r.debug.as_ref())
-                .map_or(true, |debug| match *debug {
-                    toml::Value::Integer(0) => false,
-                    toml::Value::Boolean(value) => value,
-                    _ => true
+        let mut config =
+            Config {
+                manifest_dir: manifest_dir.to_owned(),
+                deb_output_path,
+                target: target.map(|t| t.to_string()),
+                target_dir,
+                name: self.package.name.clone(),
+                deb_name: deb.name.take().unwrap_or(self.package.name.clone()),
+                deb_version: deb_version.unwrap_or(self.version_string(deb.revision)),
+                license: self.package.license.take(),
+                license_file,
+                license_file_skip_lines,
+                copyright: deb.copyright.take().ok_or_then(|| {
+                    if self.package.authors.is_empty() {
+                        Err("The package must have a copyright or authors property")?;
+                    }
+                    Ok(self.package.authors.join(", "))
+                })?,
+                homepage: self.package.homepage.clone(),
+                documentation: self.package.documentation.clone(),
+                repository: self.package.repository.take(),
+                description: self.package.description.take().unwrap_or_else(|| {
+                    format!("[generated from Rust crate {}]", self.package.name)
                 }),
-            _use_constructor_to_make_this_struct_: (),
-        };
+                extended_description: self
+                    .extended_description(deb.extended_description.take(), readme)?,
+                maintainer: deb.maintainer.take().ok_or_then(|| {
+                    Ok(self
+                        .package
+                        .authors
+                        .get(0)
+                        .ok_or("The package must have a maintainer or authors property")?
+                        .to_owned())
+                })?,
+                depends: deb.depends.take().unwrap_or("$auto".to_owned()),
+                conflicts: deb.conflicts.take(),
+                breaks: deb.breaks.take(),
+                replaces: deb.replaces.take(),
+                provides: deb.provides.take(),
+                section: deb.section.take(),
+                priority: deb.priority.take().unwrap_or("optional".to_owned()),
+                architecture: get_arch(target.unwrap_or(crate::DEFAULT_TARGET)).to_owned(),
+                conf_files: deb
+                    .conf_files
+                    .map(|x| x.iter().fold(String::new(), |a, b| a + b + "\n")),
+                assets: Assets::new(),
+                changelog: deb.changelog.take(),
+                maintainer_scripts: deb.maintainer_scripts.map(PathBuf::from),
+                features: deb.features.take().unwrap_or(vec![]),
+                default_features: deb.default_features.unwrap_or(true),
+                separate_debug_symbols: deb.separate_debug_symbols.unwrap_or(false),
+                strip: self
+                    .profile
+                    .as_ref()
+                    .and_then(|p| p.release.as_ref())
+                    .and_then(|r| r.debug.as_ref())
+                    .map_or(true, |debug| match *debug {
+                        toml::Value::Integer(0) => false,
+                        toml::Value::Boolean(value) => value,
+                        _ => true,
+                    }),
+                _use_constructor_to_make_this_struct_: (),
+            };
         let assets = self.take_assets(&config, deb.assets.take(), &root_package.targets, readme)?;
         if assets.is_empty() {
             Err("No binaries or cdylibs found. The package is empty. Please specify some assets to package in Cargo.toml")?;
@@ -607,7 +681,13 @@ impl Cargo {
         Ok(config)
     }
 
-    fn check_config(&self, manifest_dir: &Path, readme: Option<&String>, deb: &CargoDeb, listener: &dyn Listener) {
+    fn check_config(
+        &self,
+        manifest_dir: &Path,
+        readme: Option<&String>,
+        deb: &CargoDeb,
+        listener: &dyn Listener,
+    ) {
         if self.package.description.is_none() {
             listener.warning("description field is missing in Cargo.toml".to_owned());
         }
@@ -615,59 +695,95 @@ impl Cargo {
             listener.warning("license field is missing in Cargo.toml".to_owned());
         }
         if let Some(readme) = readme {
-            if deb.extended_description.is_none() && (readme.ends_with(".md") || readme.ends_with(".markdown")) {
+            if deb.extended_description.is_none()
+                && (readme.ends_with(".md") || readme.ends_with(".markdown"))
+            {
                 listener.warning(format!("extended-description field missing. Using {}, but markdown may not render well.",readme));
             }
         } else {
             for p in &["README.md", "README.markdown", "README.txt", "README"] {
                 if manifest_dir.join(p).exists() {
-                    listener.warning(format!("{} file exists, but is not specified in `readme` Cargo.toml field", p));
+                    listener.warning(format!(
+                        "{} file exists, but is not specified in `readme` Cargo.toml field",
+                        p
+                    ));
                     break;
                 }
             }
         }
     }
 
-    fn extended_description(&self, desc: Option<String>, readme: Option<&String>) -> CDResult<Option<String>> {
+    fn extended_description(
+        &self,
+        desc: Option<String>,
+        readme: Option<&String>,
+    ) -> CDResult<Option<String>> {
         Ok(if desc.is_some() {
             desc
         } else if let Some(readme) = readme {
-            Some(fs::read_to_string(readme)
-                .map_err(|err| CargoDebError::IoFile("unable to read README", err, PathBuf::from(readme)))?)
+            Some(fs::read_to_string(readme).map_err(|err| {
+                CargoDebError::IoFile("unable to read README", err, PathBuf::from(readme))
+            })?)
         } else {
             None
         })
     }
 
-    fn license_file(&mut self, license_file: Option<&Vec<String>>) -> CDResult<(Option<PathBuf>, usize)> {
+    fn license_file(
+        &mut self,
+        license_file: Option<&Vec<String>>,
+    ) -> CDResult<(Option<PathBuf>, usize)> {
         if let Some(args) = license_file {
             let mut args = args.iter();
             let file = args.next();
             let lines = if let Some(lines) = args.next() {
-                lines.parse().map_err(|e| CargoDebError::NumParse("invalid number of lines", e))?
-            } else {0};
-            Ok((file.map(|s|s.into()), lines))
+                lines
+                    .parse()
+                    .map_err(|e| CargoDebError::NumParse("invalid number of lines", e))?
+            } else {
+                0
+            };
+            Ok((file.map(|s| s.into()), lines))
         } else {
             Ok((self.package.license_file.as_ref().map(|s| s.into()), 0))
         }
     }
 
-    fn take_assets(&self, options: &Config, assets: Option<Vec<Vec<String>>>, targets: &[CargoMetadataTarget], readme: Option<&String>) -> CDResult<Assets> {
+    fn take_assets(
+        &self,
+        options: &Config,
+        assets: Option<Vec<Vec<String>>>,
+        targets: &[CargoMetadataTarget],
+        readme: Option<&String>,
+    ) -> CDResult<Assets> {
         Ok(if let Some(assets) = assets {
             // Treat all explicit assets as unresolved until after the build step
             let mut unresolved_assets = vec![];
             for mut asset_line in assets {
                 let mut asset_parts = asset_line.drain(..);
-                let source_path = PathBuf::from(asset_parts.next()
-                    .ok_or("missing path (first array entry) for asset in Cargo.toml")?);
-                let (is_built, source_path) = if let Ok(rel_path) = source_path.strip_prefix("target/release") {
-                    (true, options.path_in_build(rel_path))
-                } else {
-                    (false, options.path_in_workspace(&source_path))
-                };
-                let target_path = PathBuf::from(asset_parts.next().ok_or("missing target (second array entry) for asset in Cargo.toml")?);
-                let chmod = u32::from_str_radix(&asset_parts.next().ok_or("missing chmod (third array entry) for asset in Cargo.toml")?, 8)
-                    .map_err(|e| CargoDebError::NumParse("unable to parse chmod argument", e))?;
+                let source_path = PathBuf::from(
+                    asset_parts
+                        .next()
+                        .ok_or("missing path (first array entry) for asset in Cargo.toml")?,
+                );
+                let (is_built, source_path) =
+                    if let Ok(rel_path) = source_path.strip_prefix("target/release") {
+                        (true, options.path_in_build(rel_path))
+                    } else {
+                        (false, options.path_in_workspace(&source_path))
+                    };
+                let target_path = PathBuf::from(
+                    asset_parts
+                        .next()
+                        .ok_or("missing target (second array entry) for asset in Cargo.toml")?,
+                );
+                let chmod = u32::from_str_radix(
+                    &asset_parts
+                        .next()
+                        .ok_or("missing chmod (third array entry) for asset in Cargo.toml")?,
+                    8,
+                )
+                .map_err(|e| CargoDebError::NumParse("unable to parse chmod argument", e))?;
 
                 unresolved_assets.push(UnresolvedAsset {
                     source_path,
@@ -681,14 +797,18 @@ impl Cargo {
             let mut implied_assets: Vec<_> = targets
                 .iter()
                 .filter_map(|t| {
-                    if t.crate_types.iter().any(|ty| ty == "bin") && t.kind.iter().any(|k| k == "bin") {
+                    if t.crate_types.iter().any(|ty| ty == "bin")
+                        && t.kind.iter().any(|k| k == "bin")
+                    {
                         Some(Asset::new(
                             AssetSource::Path(options.path_in_build(&t.name)),
                             Path::new("usr/bin").join(&t.name),
                             0o755,
                             true,
                         ))
-                    } else if t.crate_types.iter().any(|ty| ty == "cdylib") && t.kind.iter().any(|k| k == "cdylib") {
+                    } else if t.crate_types.iter().any(|ty| ty == "cdylib")
+                        && t.kind.iter().any(|k| k == "cdylib")
+                    {
                         // FIXME: std has constants for the host arch, but not for cross-compilation
                         let lib_name = format!("{}{}{}", DLL_PREFIX, t.name, DLL_SUFFIX);
                         Some(Asset::new(
@@ -703,7 +823,9 @@ impl Cargo {
                 })
                 .collect();
             if let Some(readme) = readme {
-                let target_path = Path::new("usr/share/doc").join(&self.package.name).join(readme);
+                let target_path = Path::new("usr/share/doc")
+                    .join(&self.package.name)
+                    .join(readme);
                 implied_assets.push(Asset::new(
                     AssetSource::Path(PathBuf::from(readme)),
                     target_path,
@@ -726,7 +848,9 @@ impl Cargo {
         let mut parts = version.splitn(2, '-');
         let semver_main = parts.next().unwrap();
         if let Some(semver_pre) = parts.next() {
-            if semver_pre.chars().any(|c| !c.is_numeric()) && semver_pre.chars().any(|c| c.is_numeric()) {
+            if semver_pre.chars().any(|c| !c.is_numeric())
+                && semver_pre.chars().any(|c| c.is_numeric())
+            {
                 debianized_version = format!("{}~{}", semver_main, semver_pre);
                 version = &debianized_version;
             }
@@ -793,7 +917,9 @@ impl CargoDeb {
             maintainer_scripts: self.maintainer_scripts.or(parent.maintainer_scripts),
             features: self.features.or(parent.features),
             default_features: self.default_features.or(parent.default_features),
-            separate_debug_symbols: self.separate_debug_symbols.or(parent.separate_debug_symbols),
+            separate_debug_symbols: self
+                .separate_debug_symbols
+                .or(parent.separate_debug_symbols),
             variants: self.variants.or(parent.variants),
         }
     }
@@ -835,10 +961,15 @@ fn cargo_metadata(manifest_path: &Path) -> CDResult<CargoMetadata> {
     cmd.arg("--format-version=1");
     cmd.arg(format!("--manifest-path={}", manifest_path.display()));
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| CargoDebError::CommandFailed(e, "cargo (is it in your PATH?)"))?;
     if !output.status.success() {
-        return Err(CargoDebError::CommandError("cargo", "metadata".to_owned(), output.stderr));
+        return Err(CargoDebError::CommandError(
+            "cargo",
+            "metadata".to_owned(),
+            output.stderr,
+        ));
     }
 
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -855,7 +986,7 @@ fn get_arch(target: &str) -> &str {
         // https://wiki.debian.org/Multiarch/Tuples
         // rustc --print target-list
         // https://doc.rust-lang.org/std/env/consts/constant.ARCH.html
-        ("aarch64", _)          => "arm64",
+        ("aarch64", _) => "arm64",
         ("mips64", "gnuabin32") => "mipsn32",
         ("mips64el", "gnuabin32") => "mipsn32el",
         ("mipsisa32r6", _) => "mipsr6",
@@ -865,11 +996,9 @@ fn get_arch(target: &str) -> &str {
         ("mipsisa64r6el", "gnuabi64") => "mips64r6el",
         ("mipsisa64r6el", "gnuabin32") => "mipsn32r6el",
         ("powerpc", "gnuspe") => "powerpcspe",
-        ("powerpc64", _)   => "ppc64",
+        ("powerpc64", _) => "ppc64",
         ("powerpc64le", _) => "ppc64el",
-        ("i586", _) |
-        ("i686", _) |
-        ("x86", _)   => "i386",
+        ("i586", _) | ("i686", _) | ("x86", _) => "i386",
         ("x86_64", "gnux32") => "x32",
         ("x86_64", _) => "amd64",
         (arm, gnueabi) if arm.starts_with("arm") && gnueabi.ends_with("hf") => "armhf",
@@ -927,7 +1056,10 @@ mod tests {
             true,
         );
         let debug_target = a.debug_target().expect("Got unexpected None");
-        assert_eq!(debug_target, Path::new("/usr/lib/debug/usr/bin/baz/bar.debug"));
+        assert_eq!(
+            debug_target,
+            Path::new("/usr/lib/debug/usr/bin/baz/bar.debug")
+        );
     }
 
     /// Tests that getting the debug target for an Asset that `is_built` and that

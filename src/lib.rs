@@ -18,30 +18,31 @@ cargo deb # run this in your Cargo project directory
 The library interface is experimental. See `main.rs` for usage.
 */
 
-#[macro_use] extern crate quick_error;
+#[macro_use]
+extern crate quick_error;
 pub mod compress;
+mod config;
 pub mod control;
 pub mod data;
-pub mod manifest;
-mod dependencies;
-mod ok_or;
-mod wordsplit;
-mod error;
-mod tararchive;
 mod debarchive;
-mod config;
-mod pathbytes;
+mod dependencies;
+mod error;
 pub mod listener;
+pub mod manifest;
+mod ok_or;
+mod pathbytes;
+mod tararchive;
+mod wordsplit;
 
 use crate::listener::Listener;
-use std::fs;
 use std::env;
-use std::path::Path;
+use std::fs;
 use std::io;
+use std::path::Path;
 use std::process::{Command, ExitStatus};
 
-pub use crate::error::*;
 pub use crate::debarchive::DebArchive;
+pub use crate::error::*;
 pub use crate::manifest::Config;
 
 const TAR_REJECTS_CUR_DIR: bool = true;
@@ -51,7 +52,10 @@ const DEFAULT_TARGET: &str = include_str!(concat!(env!("OUT_DIR"), "/default_tar
 
 /// Run `dpkg` to install `deb` archive at the given path
 pub fn install_deb(path: &Path) -> CDResult<()> {
-    let status = Command::new("sudo").arg("dpkg").arg("-i").arg(path)
+    let status = Command::new("sudo")
+        .arg("dpkg")
+        .arg("-i")
+        .arg(path)
         .status()?;
     if !status.success() {
         Err(CargoDebError::InstallFailed)?;
@@ -67,7 +71,12 @@ pub fn reset_deb_directory(options: &Config) -> io::Result<()> {
 }
 
 /// Builds a release binary with `cargo build --release`
-pub fn cargo_build(options: &Config, target: Option<&str>, other_flags: &[String], verbose: bool) -> CDResult<()> {
+pub fn cargo_build(
+    options: &Config,
+    target: Option<&str>,
+    other_flags: &[String],
+    verbose: bool,
+) -> CDResult<()> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&options.manifest_dir);
     cmd.arg("build").args(&["--release", "--all"]);
@@ -82,7 +91,9 @@ pub fn cargo_build(options: &Config, target: Option<&str>, other_flags: &[String
     if let Some(target) = target {
         cmd.arg(format!("--target={}", target));
         // Set helpful defaults for cross-compiling
-        if env::var_os("PKG_CONFIG_ALLOW_CROSS").is_none() && env::var_os("PKG_CONFIG_PATH").is_none() {
+        if env::var_os("PKG_CONFIG_ALLOW_CROSS").is_none()
+            && env::var_os("PKG_CONFIG_PATH").is_none()
+        {
             let pkg_config_path = format!("/usr/lib/{}/pkgconfig", debian_triple(target));
             if Path::new(&pkg_config_path).exists() {
                 cmd.env("PKG_CONFIG_ALLOW_CROSS", "1");
@@ -98,7 +109,8 @@ pub fn cargo_build(options: &Config, target: Option<&str>, other_flags: &[String
         cmd.arg(format!("--features={}", features.join(",")));
     }
 
-    let status = cmd.status()
+    let status = cmd
+        .status()
         .map_err(|e| CargoDebError::CommandFailed(e, "cargo"))?;
     if !status.success() {
         Err(CargoDebError::BuildFailed)?;
@@ -113,13 +125,17 @@ fn debian_triple(rust_target_triple: &str) -> String {
     let abi = p.last().unwrap_or("");
 
     let (darch, dabi) = match (arch, abi) {
-        ("i586", _) |
-        ("i686", _) => ("i386", "gnu"),
+        ("i586", _) | ("i686", _) => ("i386", "gnu"),
         ("x86_64", _) => ("x86_64", "gnu"),
         ("aarch64", _) => ("aarch64", "gnu"),
-        (arm, abi) if arm.starts_with("arm") || arm.starts_with("thumb") => {
-            ("arm", if abi.ends_with("hf") {"gnueabihf"} else {"gnueabi"})
-        },
+        (arm, abi) if arm.starts_with("arm") || arm.starts_with("thumb") => (
+            "arm",
+            if abi.ends_with("hf") {
+                "gnueabihf"
+            } else {
+                "gnueabi"
+            },
+        ),
         ("mipsel", _) => ("mipsel", "gnu"),
         (risc, _) if risc.starts_with("riscv64") => ("riscv64", "gnu"),
         (arch, abi) => (arch, abi),
@@ -136,7 +152,12 @@ fn ensure_success(status: ExitStatus) -> io::Result<()> {
 }
 
 /// Strips the binary that was created with cargo
-pub fn strip_binaries(options: &mut Config, target: Option<&str>, listener: &mut dyn Listener, separate_file: bool) -> CDResult<()> {
+pub fn strip_binaries(
+    options: &mut Config,
+    target: Option<&str>,
+    listener: &mut dyn Listener,
+    separate_file: bool,
+) -> CDResult<()> {
     let mut cargo_config = None;
     let objcopy_tmp;
     let strip_tmp;
@@ -166,8 +187,13 @@ pub fn strip_binaries(options: &mut Config, target: Option<&str>, listener: &mut
                 // We always strip the symbols to a separate file,  but they will only be included if specified
 
                 // The debug_path and debug_filename should never return None if we have an AssetSource::Path
-                let debug_path = asset.source.debug_source().expect("Failed to compute debug source path");
-                let debug_filename = debug_path.file_name().expect("Built binary has no filename");
+                let debug_path = asset
+                    .source
+                    .debug_source()
+                    .expect("Failed to compute debug source path");
+                let debug_filename = debug_path
+                    .file_name()
+                    .expect("Built binary has no filename");
                 let conf_path = cargo_config
                     .as_ref()
                     .map(|c| c.path())
@@ -206,21 +232,26 @@ pub fn strip_binaries(options: &mut Config, target: Option<&str>, listener: &mut
                             debug_path
                                 .parent()
                                 .expect("Debug source file had no parent path"),
-                        ).arg(format!(
+                        )
+                        .arg(format!(
                             "--add-gnu-debuglink={}",
                             debug_filename
                                 .to_str()
                                 .expect("Debug source file had no filename")
-                        )).arg(path)
+                        ))
+                        .arg(path)
                         .status()
                         .and_then(ensure_success)
                         .map_err(|err| CargoDebError::CommandFailed(err, "objcopy"))?;
                 }
                 listener.info(format!("Stripped '{}'", path.display()));
-            },
+            }
             None => {
                 // This is unexpected - emit a warning if we come across it
-                listener.warning(format!("Found built asset with non-path source '{:?}'", asset));
+                listener.warning(format!(
+                    "Found built asset with non-path source '{:?}'",
+                    asset
+                ));
             }
         }
     }

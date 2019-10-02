@@ -11,7 +11,11 @@ use std::path::{Path, PathBuf};
 use zopfli::{self, Format, Options};
 
 /// Generates an uncompressed tar archive and hashes of its files
-pub fn generate_archive(options: &Config, time: u64, listener: &mut dyn Listener) -> CDResult<(Vec<u8>, HashMap<PathBuf, Digest>)> {
+pub fn generate_archive(
+    options: &Config,
+    time: u64,
+    listener: &mut dyn Listener,
+) -> CDResult<(Vec<u8>, HashMap<PathBuf, Digest>)> {
     let mut archive = Archive::new(time);
     let copy_hashes = archive_files(&mut archive, options, listener)?;
     Ok((archive.into_inner()?, copy_hashes))
@@ -24,7 +28,12 @@ pub(crate) fn generate_changelog_asset(options: &Config) -> CDResult<Option<Vec<
             .and_then(|content| {
                 // The input is plaintext, but the debian package should contain gzipped one.
                 let mut compressed = Vec::with_capacity(content.len());
-                zopfli::compress(&Options::default(), &Format::Gzip, &content, &mut compressed)?;
+                zopfli::compress(
+                    &Options::default(),
+                    &Format::Gzip,
+                    &content,
+                    &mut compressed,
+                )?;
                 compressed.shrink_to_fit();
                 Ok(compressed)
             })
@@ -47,8 +56,9 @@ pub(crate) fn generate_copyright_asset(options: &Config) -> CDResult<Vec<u8>> {
         writeln!(&mut copyright, "License: {}", license)?;
     }
     if let Some(ref path) = options.license_file {
-        let license_string = fs::read_to_string(options.path_in_workspace(path))
-            .map_err(|e| CargoDebError::IoFile("unable to read license file", e, path.to_owned()))?;
+        let license_string = fs::read_to_string(options.path_in_workspace(path)).map_err(|e| {
+            CargoDebError::IoFile("unable to read license file", e, path.to_owned())
+        })?;
         // Skip the first `A` number of lines and then iterate each line after that.
         for line in license_string.lines().skip(options.license_file_skip_lines) {
             // If the line is a space, add a dot, else write the line.
@@ -67,12 +77,24 @@ pub(crate) fn generate_copyright_asset(options: &Config) -> CDResult<Vec<u8>> {
 
 /// Copies all the files to be packaged into the tar archive.
 /// Returns MD5 hashes of files copied
-fn archive_files(archive: &mut Archive, options: &Config, listener: &mut dyn Listener) -> CDResult<HashMap<PathBuf, Digest>> {
+fn archive_files(
+    archive: &mut Archive,
+    options: &Config,
+    listener: &mut dyn Listener,
+) -> CDResult<HashMap<PathBuf, Digest>> {
     let mut hashes = HashMap::new();
     for asset in &options.assets.resolved {
         let out_data = asset.source.data()?;
 
-        listener.info(format!("{} -> {}", asset.source.path().unwrap_or_else(|| Path::new("-")).display(), asset.target_path.display()));
+        listener.info(format!(
+            "{} -> {}",
+            asset
+                .source
+                .path()
+                .unwrap_or_else(|| Path::new("-"))
+                .display(),
+            asset.target_path.display()
+        ));
 
         hashes.insert(asset.target_path.clone(), md5::compute(&out_data));
         archive.file(&asset.target_path, &out_data, asset.chmod)?;
